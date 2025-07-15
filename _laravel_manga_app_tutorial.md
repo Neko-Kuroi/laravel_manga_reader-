@@ -9,6 +9,7 @@
 - Composer インストール済み
 - SQLite または任意のデータベース接続が可能
 - ZIP アーカイブ拡張モジュール (`ZipArchive`)
+- RAR アーカイブ拡張モジュール (`ext-rar`)
 - [Intervention Image](https://image.intervention.io/) を使用して画像変換
 
 ---

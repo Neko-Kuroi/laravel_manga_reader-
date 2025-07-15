@@ -8,6 +8,7 @@ use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\File;
 use ZipArchive;
+use RarArchive;
 use Intervention\Image\Laravel\Facades\Image as InterventionImage;
 
 class MangaController extends Controller
@@ -160,6 +161,26 @@ class MangaController extends Controller
                     $img->toWebp(80)->save($extractTo.'/'.sprintf('%04d.webp', $i));
                 }
                 $zip->close();
+            }
+        } elseif (in_array($ext, ['rar','cbr'])) {
+            try {
+                $rar = RarArchive::open($archive);
+                $entries = $rar->getEntries();
+                $imageCount = 0;
+                foreach ($entries as $entry) {
+                    $name = $entry->getName();
+                    if (!preg_match('/\.(jpg|jpeg|png)$/i', $name)) continue;
+                    $stream = $entry->getStream();
+                    if ($stream) {
+                        $data = stream_get_contents($stream);
+                        fclose($stream);
+                        $img = InterventionImage::read($data)->resize(1200, 1600, fn($c)=>$c->aspectRatio());
+                        $img->toWebp(80)->save($extractTo.'/'.sprintf('%04d.webp', $imageCount++));
+                    }
+                }
+                $rar->close();
+            } catch (\Exception $e) {
+                Log::error("RAR extraction failed: " . $e->getMessage());
             }
         }
     }
