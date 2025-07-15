@@ -10,6 +10,6 @@ Route::get('/read', [MangaController::class, 'read'])->name('read');
 Route::get('/reader', [MangaController::class, 'reader'])->name('reader');
 Route::get('/reader_data', [MangaController::class, 'readerData'])->name('reader_data');
 Route::get('/get_images', [MangaController::class, 'getImages'])->name('get_images');
-Route::get('/image/{path}', [MangaController::class, 'image'])
-     ->where('path', '.*')->name('image');
+Route::get('/reader/{manga:hash}/image/{page}', [MangaController::class, 'streamImage'])
+     ->name('manga.image');
 Route::post('/clear_cache', [MangaController::class, 'clearCache'])->name('clear_cache');

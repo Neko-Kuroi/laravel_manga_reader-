@@ -2,7 +2,7 @@
     <p class="text-sm text-gray-600">ページ <span id="loaded">0</span> / <span id="total">{{ $totalPages }}</span></p>
     <div id="image-container" class="space-y-2"></div>
     <button id="load-more"
-            hx-get="{{ url('/get_images') }}"
+            hx-get="{{ route('get_images') }}"
             hx-target="#image-container"
             hx-swap="beforeend"
             hx-include="#load-more"
@@ -12,20 +12,23 @@
 </div>
 <script>
 document.addEventListener('htmx:afterRequest', function(evt){
-    if(evt.detail.pathInfo.requestPath === '/get_images'){
-        const data = JSON.parse(evt.detail.xhr.responseText);
+    if(evt.detail.pathInfo.requestPath === '{{ route('get_images') }}'){
+        const data = evt.detail.xhr.responseText;
         const container = document.getElementById('image-container');
-        data.images.forEach(src=>{
-            const img = document.createElement('img');
-            img.src = src;
-            img.className = 'w-full';
-            container.appendChild(img);
-        });
-        document.getElementById('loaded').textContent = data.current_offset + data.images.length;
-        if(data.current_offset + data.images.length >= data.total_pages){
+        // HTMX will automatically append the HTML returned by the server
+        
+        // Update loaded page count (assuming server returns current_offset and total_pages in a header or similar)
+        // For simplicity, we'll just update the offset for the next request
+        const currentOffset = parseInt(evt.detail.elt.getAttribute('hx-get').split('offset=')[1] || 0);
+        const totalPages = parseInt(document.getElementById('total').textContent);
+        const loadedImagesCount = container.children.length;
+
+        document.getElementById('loaded').textContent = loadedImagesCount;
+
+        if(loadedImagesCount >= totalPages){
             document.getElementById('load-more').style.display='none';
         } else {
-            evt.detail.elt.setAttribute('hx-get', '/get_images?offset=' + (data.current_offset + data.images.length));
+            evt.detail.elt.setAttribute('hx-get', '{{ route('get_images') }}?offset=' + loadedImagesCount);
         }
     }
 });
