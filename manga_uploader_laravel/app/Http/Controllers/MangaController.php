@@ -8,7 +8,6 @@ use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\File;
 use ZipArchive;
-use RarArchive;
 use Intervention\Image\Laravel\Facades\Image as InterventionImage;
 
 class MangaController extends Controller
@@ -150,6 +149,7 @@ class MangaController extends Controller
     private function extractArchive($archive, $extractTo, $ext)
     {
         if (!is_dir($extractTo)) mkdir($extractTo, 0755, true);
+
         if (in_array($ext, ['zip','cbz'])) {
             $zip = new ZipArchive;
             if ($zip->open($archive) === TRUE) {
@@ -157,30 +157,35 @@ class MangaController extends Controller
                     $name = $zip->getNameIndex($i);
                     if (!preg_match('/\.(jpg|jpeg|png)$/i', $name)) continue;
                     $data = $zip->getFromIndex($i);
-                    $img = InterventionImage::read($data)->resize(1200, 1600, fn($c)=>$c->aspectRatio());
-                    $img->toWebp(80)->save($extractTo.'/'.sprintf('%04d.webp', $i));
+                    $img = InterventionImage::make($data)->resize(1200, 1600, fn($c)=>$c->aspectRatio());
+                    $img->save($extractTo.'/'.sprintf('%04d.webp', $i), 80, 'webp');
                 }
                 $zip->close();
+            } else {
+                Log::error("Failed to open ZIP archive: " . $archive);
             }
         } elseif (in_array($ext, ['rar','cbr'])) {
-            try {
-                $rar = RarArchive::open($archive);
-                $entries = $rar->getEntries();
+            // Use unrar command-line tool
+            $command = sprintf('unrar x -o- %s %s', escapeshellarg($archive), escapeshellarg($extractTo . DIRECTORY_SEPARATOR));
+            Log::info("Executing unrar command: " . $command);
+            $output = shell_exec($command);
+
+            if ($output === null) {
+                Log::error("Unrar command failed or returned no output for archive: " . $archive);
+            } else {
+                Log::info("Unrar output: " . $output);
+                // After extraction, process images to webp
+                $extractedFiles = glob("$extractTo/*.{jpg,jpeg,png}", GLOB_BRACE);
                 $imageCount = 0;
-                foreach ($entries as $entry) {
-                    $name = $entry->getName();
-                    if (!preg_match('/\.(jpg|jpeg|png)$/i', $name)) continue;
-                    $stream = $entry->getStream();
-                    if ($stream) {
-                        $data = stream_get_contents($stream);
-                        fclose($stream);
-                        $img = InterventionImage::read($data)->resize(1200, 1600, fn($c)=>$c->aspectRatio());
-                        $img->toWebp(80)->save($extractTo.'/'.sprintf('%04d.webp', $imageCount++));
+                foreach ($extractedFiles as $file) {
+                    try {
+                        $img = InterventionImage::make($file)->resize(1200, 1600, fn($c)=>$c->aspectRatio());
+                        $img->save($extractTo.'/'.sprintf('%04d.webp', $imageCount++), 80, 'webp');
+                        unlink($file); // Delete original extracted image
+                    } catch (\Exception $e) {
+                        Log::error("Image processing failed for " . $file . ": " . $e->getMessage());
                     }
                 }
-                $rar->close();
-            } catch (\Exception $e) {
-                Log::error("RAR extraction failed: " . $e->getMessage());
             }
         }
     }
