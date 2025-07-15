@@ -24,6 +24,11 @@ class MangaController extends Controller
     public function add(Request $request)
     {
         $url = urldecode($request->input('manga_url'));
+
+        if (!$this->validateUrl($url)) {
+            return response('<p class="text-red-600">無効なURL形式、または許可されていないURLです。</p>');
+        }
+
         $hash = md5($url);
         $title = pathinfo(parse_url($url, PHP_URL_PATH), PATHINFO_FILENAME);
         $ext = strtolower(pathinfo($url, PATHINFO_EXTENSION));
@@ -38,6 +43,24 @@ class MangaController extends Controller
         Manga::create(['hash' => $hash, 'url' => $url, 'title' => $title, 'file_ext' => $ext]);
         $mangas = Manga::orderBy('title')->get();
         return view('_manga_list', compact('mangas'));
+    }
+
+    private function validateUrl($url)
+    {
+        $parsed = parse_url($url);
+        if (!$parsed || !isset($parsed['scheme']) || !in_array($parsed['scheme'], ['http', 'https'])) {
+            return false;
+        }
+        if (!isset($parsed['host'])) {
+            return false;
+        }
+
+        // Prevent SSRF by checking for internal IP addresses
+        $ip = gethostbyname($parsed['host']);
+        if (filter_var($ip, FILTER_VALIDATE_IP, FILTER_FLAG_NO_PRIV_RANGE | FILTER_FLAG_NO_RES_RANGE) === false) {
+            return false;
+        }
+        return true;
     }
 
     public function remove(Request $request)
@@ -117,8 +140,13 @@ class MangaController extends Controller
 
     public function image($path)
     {
-        $full = storage_path("app/$path");
-        if (!File::exists($full)) abort(404);
+        $safePath = str_replace(['../', '..\\'], '', $path);
+        $full = storage_path("app/manga_cache/$safePath");
+
+        // Ensure the path is within the intended manga_cache directory
+        if (!File::exists($full) || !str_starts_with($full, storage_path('app/manga_cache'))) {
+            abort(404);
+        }
         return response()->file($full);
     }
 
@@ -132,18 +160,36 @@ class MangaController extends Controller
     private function downloadFile($url, $savePath)
     {
         if (File::exists($savePath)) return;
+        
         $dir = dirname($savePath);
         if (!is_dir($dir)) mkdir($dir, 0755, true);
+        
         $ch = curl_init($url);
         $fp = fopen($savePath, 'wb');
+        
         curl_setopt_array($ch, [
             CURLOPT_FILE => $fp,
             CURLOPT_TIMEOUT => 120,
             CURLOPT_FOLLOWLOCATION => true,
+            CURLOPT_MAXREDIRS => 5,
+            CURLOPT_SSL_VERIFYPEER => true,
         ]);
-        curl_exec($ch);
+        
+        $result = curl_exec($ch);
+        $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        $error = curl_error($ch);
+        
         curl_close($ch);
         fclose($fp);
+        
+        if ($result === false || $httpCode !== 200) {
+            // Clean up the partially downloaded file
+            if (File::exists($savePath)) {
+                unlink($savePath);
+            }
+            Log::error("Download failed for URL: {$url}. HTTP Code: {$httpCode}, Error: {$error}");
+            throw new \Exception("Download failed: {$error}");
+        }
     }
 
     private function extractArchive($archive, $extractTo, $ext)
