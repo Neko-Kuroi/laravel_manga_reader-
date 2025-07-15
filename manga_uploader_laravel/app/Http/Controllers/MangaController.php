@@ -1,4 +1,5 @@
 <?php
+// MangaController.php - 修正版の主要部分
 
 namespace App\Http\Controllers;
 
@@ -8,12 +9,14 @@ use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\File;
 use ZipArchive;
-use Intervention\Image\Laravel\Facades\Image as InterventionImage;
+use RarArchive; // RAR対応
+use Intervention\Image\Facades\Image as InterventionImage;
 
 class MangaController extends Controller
 {
     const CACHE_SIZE_LIMIT_MB = 270;
     const IMAGES_PER_LOAD = 5;
+    const ALLOWED_DOMAINS = ['example.com', 'trusted-site.com']; // 許可されたドメイン
 
     public function index()
     {
@@ -21,14 +24,37 @@ class MangaController extends Controller
         return view('index', compact('mangas'));
     }
 
+    // 不足していたgetImagesメソッドを追加
+    public function getImages(Request $request)
+    {
+        $images = session('current_manga_images', []);
+        $offset = (int)$request->query('offset', 0);
+        $slice = collect($images)->slice($offset, self::IMAGES_PER_LOAD)->values();
+        $urls = $slice->map(fn($p) => route('image', ['path' => ltrim(str_replace(storage_path('app'), '', $p), '/')]));
+        
+        return response()->json([
+            'images' => $urls,
+            'current_offset' => $offset,
+            'total_pages' => count($images)
+        ]);
+    }
+
+    // セキュリティ強化されたaddメソッド
     public function add(Request $request)
     {
         $url = urldecode($request->input('manga_url'));
-
-        if (!$this->validateUrl($url)) {
-            return response('<p class="text-red-600">無効なURL形式、または許可されていないURLです。</p>');
+        
+        // URL検証を強化
+        if (!filter_var($url, FILTER_VALIDATE_URL)) {
+            return response('<p class="text-red-600">無効なURLです。</p>');
         }
-
+        
+        // 許可されたドメインのみ許可（オプション）
+        $domain = parse_url($url, PHP_URL_HOST);
+        if (!empty(self::ALLOWED_DOMAINS) && !in_array($domain, self::ALLOWED_DOMAINS)) {
+            return response('<p class="text-red-600">許可されていないドメインです。</p>');
+        }
+        
         $hash = md5($url);
         $title = pathinfo(parse_url($url, PHP_URL_PATH), PATHINFO_FILENAME);
         $ext = strtolower(pathinfo($url, PATHINFO_EXTENSION));
@@ -36,33 +62,14 @@ class MangaController extends Controller
         if (!in_array($ext, ['zip','cbz','rar','cbr'])) {
             return response('<p class="text-red-600">無効なファイル形式です。</p>');
         }
+        
         if (Manga::where('hash', $hash)->exists()) {
             return response('<p class="text-red-600">このURLは既に追加済みです。</p>');
         }
 
-        Manga::create(['hash' => $hash, 'url' => $url, 'title' => $title, 'file_ext' => $ext]);
+        Manga::create(compact('hash','url','title','file_ext'));
         $mangas = Manga::orderBy('title')->get();
         return view('_manga_list', compact('mangas'));
-    }
-
-    private function validateUrl($url)
-    {
-        // URLの形式チェック
-        if (!filter_var($url, FILTER_VALIDATE_URL)) {
-            return false;
-        }
-        
-        $parsed = parse_url($url);
-        if (!$parsed || !isset($parsed['scheme']) || !in_array($parsed['scheme'], ['http', 'https'])) {
-            return false;
-        }
-        
-        // 内部IPアドレスのチェック
-        $ip = gethostbyname($parsed['host']);
-        if (filter_var($ip, FILTER_VALIDATE_IP, FILTER_FLAG_NO_PRIV_RANGE | FILTER_FLAG_NO_RES_RANGE) === false) {
-            return false;
-        }
-        return true;
     }
 
     public function remove(Request $request)
@@ -121,37 +128,29 @@ class MangaController extends Controller
 
         return view('_reader_content', [
             'title' => $manga->title,
-            'total_pages' => $images->count(),
+            'totalPages' => $images->count(), // Corrected variable name
             'offset' => 0
         ]);
     }
 
-    public function getImages(Request $request)
-    {
-        $images = session('current_manga_images', []);
-        $offset = (int)$request->query('offset', 0);
-        $slice = array_slice($images, $offset, self::IMAGES_PER_LOAD);
-        $urls = collect($slice)->map(fn($p) => route('image', ['path' => ltrim(str_replace(storage_path('app'), '', $p), '/')]));
-        
-        return response()->json([
-            'images' => $urls,
-            'current_offset' => $offset,
-            'total_pages' => count($images)
-        ]);
-    }
-
+    // セキュリティ強化されたimageメソッド
     public function image($path)
     {
         // パストラバーサル攻撃を防ぐ
-        $safePath = str_replace(['../', '..\'], '', $path);
-        $fullPath = storage_path("app/manga_cache/$safePath");
+        $path = str_replace(['../', '..\\'], '', $path);
+        $full = storage_path("app/$path");
         
-        // manga_cache ディレクトリ内のファイルのみ許可
-        if (!File::exists($fullPath) || !str_starts_with(realpath($fullPath), realpath(storage_path('app/manga_cache')))) {
+        // storage/app配下のファイルのみ許可
+        $allowedPath = storage_path('app/manga_cache');
+        if (strpos(realpath($full), realpath($allowedPath)) !== 0) {
+            abort(403, 'Access denied');
+        }
+        
+        if (!File::exists($full)) {
             abort(404);
         }
         
-        return response()->file($fullPath);
+        return response()->file($full);
     }
 
     public function clearCache()
@@ -198,47 +197,116 @@ class MangaController extends Controller
         }
     }
 
+    // RAR対応を追加したextractArchiveメソッド
     private function extractArchive($archive, $extractTo, $ext)
     {
-        if (!is_dir($extractTo)) mkdir($extractTo, 0755, true);
-
+        if (!is_dir($extractTo)) {
+            mkdir($extractTo, 0755, true);
+        }
+        
         if (in_array($ext, ['zip','cbz'])) {
-            $zip = new ZipArchive;
-            if ($zip->open($archive) === TRUE) {
-                for ($i = 0; $i < $zip->numFiles; $i++) {
-                    $name = $zip->getNameIndex($i);
-                    if (!preg_match('/\.(jpg|jpeg|png)$/i', $name)) continue;
-                    $data = $zip->getFromIndex($i);
-                    $img = InterventionImage::make($data)->resize(1200, 1600, fn($c)=>$c->aspectRatio());
-                    $img->save($extractTo.'/'.sprintf('%04d.webp', $i), 80, 'webp');
-                }
-                $zip->close();
-            } else {
-                Log::error("Failed to open ZIP archive: " . $archive);
-            }
+            $this->extractZip($archive, $extractTo);
         } elseif (in_array($ext, ['rar','cbr'])) {
-            // Use unrar command-line tool
-            $command = sprintf('unrar x -o- %s %s', escapeshellarg($archive), escapeshellarg($extractTo . DIRECTORY_SEPARATOR));
-            Log::info("Executing unrar command: " . $command);
-            $output = shell_exec($command);
+            $this->extractRar($archive, $extractTo);
+        }
+    }
 
-            if ($output === null) {
-                Log::error("Unrar command failed or returned no output for archive: " . $archive);
-            } else {
-                Log::info("Unrar output: " . $output);
-                // After extraction, process images to webp
-                $extractedFiles = glob("$extractTo/*.{jpg,jpeg,png}", GLOB_BRACE);
-                $imageCount = 0;
-                foreach ($extractedFiles as $file) {
+    private function extractZip($archive, $extractTo)
+    {
+        $zip = new ZipArchive;
+        if ($zip->open($archive) === TRUE) {
+            for ($i = 0; $i < $zip->numFiles; $i++) {
+                $name = $zip->getNameIndex($i);
+                if (!preg_match('/\.(jpg|jpeg|png|gif|bmp)$/i', $name)) continue;
+                
+                $data = $zip->getFromIndex($i);
+                if ($data === false) continue;
+                
+                try {
+                    $img = InterventionImage::make($data)
+                        ->resize(1200, 1600, function($constraint) {
+                            $constraint->aspectRatio();
+                        });
+                    $img->save($extractTo.'/'.sprintf('%04d.webp', $i), 80, 'webp');
+                } catch (\Exception $e) {
+                    Log::error("Image processing failed: " . $e->getMessage());
+                }
+            }
+            $zip->close();
+        }
+    }
+
+    private function extractRar($archive, $extractTo)
+    {
+        // PHPのRarArchiveクラスを使用
+        if (class_exists('RarArchive')) {
+            $rar = RarArchive::open($archive);
+            if ($rar) {
+                $entries = $rar->getEntries();
+                $i = 0;
+                foreach ($entries as $entry) {
+                    if (!preg_match('/\.(jpg|jpeg|png|gif|bmp)$/i', $entry->getName())) continue;
+                    
+                    $data = $entry->getStream();
+                    if ($data === false) continue;
+                    
                     try {
-                        $img = InterventionImage::make($file)->resize(1200, 1600, fn($c)=>$c->aspectRatio());
-                        $img->save($extractTo.'/'.sprintf('%04d.webp', $imageCount++), 80, 'webp');
-                        unlink($file); // Delete original extracted image
+                        $img = InterventionImage::make(stream_get_contents($data))
+                            ->resize(1200, 1600, function($constraint) {
+                                $constraint->aspectRatio();
+                            });
+                        $img->save($extractTo.'/'.sprintf('%04d.webp', $i), 80, 'webp');
+                        $i++;
                     } catch (\Exception $e) {
-                        Log::error("Image processing failed for " . $file . ": " . $e->getMessage());
+                        Log::error("Image processing failed: " . $e->getMessage());
                     }
                 }
+                $rar->close();
             }
+        } else {
+            // システムコマンドを使用（unrarまたは7zが必要）
+            $this->extractRarWithCommand($archive, $extractTo);
+        }
+    }
+
+    private function extractRarWithCommand($archive, $extractTo)
+    {
+        $tempDir = $extractTo . '_temp';
+        if (!is_dir($tempDir)) {
+            mkdir($tempDir, 0755, true);
+        }
+        
+        // unrarコマンドを試す
+        $command = "unrar x " . escapeshellarg($archive) . " " . escapeshellarg($tempDir);
+        exec($command, $output, $return_var);
+        
+        if ($return_var !== 0) {
+            // 7zコマンドを試す
+            $command = "7z x " . escapeshellarg($archive) . " -o" . escapeshellarg($tempDir);
+            exec($command, $output, $return_var);
+        }
+        
+        if ($return_var === 0) {
+            // 解凍されたファイルを処理
+            $files = glob($tempDir . '/*.{jpg,jpeg,png,gif,bmp}', GLOB_BRACE);
+            sort($files);
+            
+            foreach ($files as $i => $file) {
+                try {
+                    $img = InterventionImage::make($file)
+                        ->resize(1200, 1600, function($constraint) {
+                            $constraint->aspectRatio();
+                        });
+                    $img->save($extractTo.'/'.sprintf('%04d.webp', $i), 80, 'webp');
+                } catch (\Exception $e) {
+                    Log::error("Image processing failed: " . $e->getMessage());
+                }
+            }
+        }
+        
+        // 一時ディレクトリを削除
+        if (is_dir($tempDir)) {
+            File::deleteDirectory($tempDir);
         }
     }
 
