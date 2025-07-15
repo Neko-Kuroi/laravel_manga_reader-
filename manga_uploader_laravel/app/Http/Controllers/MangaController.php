@@ -47,15 +47,17 @@ class MangaController extends Controller
 
     private function validateUrl($url)
     {
+        // URLの形式チェック
+        if (!filter_var($url, FILTER_VALIDATE_URL)) {
+            return false;
+        }
+        
         $parsed = parse_url($url);
         if (!$parsed || !isset($parsed['scheme']) || !in_array($parsed['scheme'], ['http', 'https'])) {
             return false;
         }
-        if (!isset($parsed['host'])) {
-            return false;
-        }
-
-        // Prevent SSRF by checking for internal IP addresses
+        
+        // 内部IPアドレスのチェック
         $ip = gethostbyname($parsed['host']);
         if (filter_var($ip, FILTER_VALIDATE_IP, FILTER_FLAG_NO_PRIV_RANGE | FILTER_FLAG_NO_RES_RANGE) === false) {
             return false;
@@ -140,14 +142,16 @@ class MangaController extends Controller
 
     public function image($path)
     {
-        $safePath = str_replace(['../', '..\\'], '', $path);
-        $full = storage_path("app/manga_cache/$safePath");
-
-        // Ensure the path is within the intended manga_cache directory
-        if (!File::exists($full) || !str_starts_with($full, storage_path('app/manga_cache'))) {
+        // パストラバーサル攻撃を防ぐ
+        $safePath = str_replace(['../', '..\'], '', $path);
+        $fullPath = storage_path("app/manga_cache/$safePath");
+        
+        // manga_cache ディレクトリ内のファイルのみ許可
+        if (!File::exists($fullPath) || !str_starts_with(realpath($fullPath), realpath(storage_path('app/manga_cache')))) {
             abort(404);
         }
-        return response()->file($full);
+        
+        return response()->file($fullPath);
     }
 
     public function clearCache()
@@ -159,6 +163,11 @@ class MangaController extends Controller
 
     private function downloadFile($url, $savePath)
     {
+        // URL検証
+        if (!$this->validateUrl($url)) {
+            throw new \Exception("Invalid URL: $url");
+        }
+        
         if (File::exists($savePath)) return;
         
         $dir = dirname($savePath);
@@ -173,6 +182,7 @@ class MangaController extends Controller
             CURLOPT_FOLLOWLOCATION => true,
             CURLOPT_MAXREDIRS => 5,
             CURLOPT_SSL_VERIFYPEER => true,
+            CURLOPT_USERAGENT => 'Mozilla/5.0 (compatible; MangaViewer/1.0)',
         ]);
         
         $result = curl_exec($ch);
@@ -183,12 +193,8 @@ class MangaController extends Controller
         fclose($fp);
         
         if ($result === false || $httpCode !== 200) {
-            // Clean up the partially downloaded file
-            if (File::exists($savePath)) {
-                unlink($savePath);
-            }
-            Log::error("Download failed for URL: {$url}. HTTP Code: {$httpCode}, Error: {$error}");
-            throw new \Exception("Download failed: {$error}");
+            if (File::exists($savePath)) unlink($savePath);
+            throw new \Exception("Download failed: {$error} (HTTP {$httpCode})");
         }
     }
 

@@ -1,5 +1,5 @@
 <div>
-    <p class="text-sm text-gray-600">ページ <span id="loaded">0</span> / <span id="total">{{ $total_pages }}</span></p>
+    <p class="text-sm text-gray-600">ページ <span id="loaded">0</span> / <span id="total">{{ $totalPages }}</span></p>
     <div id="image-container" class="space-y-2"></div>
     <button id="load-more"
             hx-get="{{ url('/get_images') }}"
